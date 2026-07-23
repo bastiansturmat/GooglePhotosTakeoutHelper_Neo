@@ -1,3 +1,7 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:archive/archive.dart';
 import 'package:gpth_neo/gpth_lib_exports.dart';
 import 'package:test/test.dart';
 
@@ -69,6 +73,57 @@ void main() {
         () => ZipExtractionLimits.fromCliValues('1', '0'),
         throwsFormatException,
       );
+    });
+
+    test('marks app-supplied limits as controlled extraction', () {
+      expect(ZipExtractionLimits().isControlled, isFalse);
+      expect(ZipExtractionLimits(workers: 1).isControlled, isTrue);
+      expect(ZipExtractionLimits(threadsPerProcess: 4).isControlled, isTrue);
+    });
+  });
+
+  group('SevenZipInvocation', () {
+    test('starts the executable directly and keeps diagnostics on stderr', () {
+      final invocation = SevenZipInvocation.forExtraction(
+        executable: r'C:\Program Files\7-Zip\7z.exe',
+        zipPath: r'D:\Takeout\part 1.zip',
+        outputPath: r'D:\Takeout\.gpth-unzipped',
+        threads: 4,
+      );
+
+      expect(invocation.runInShell, isFalse);
+      expect(invocation.arguments, contains('-mmt=4'));
+      expect(invocation.arguments, contains('-bse1'));
+      expect(invocation.arguments, isNot(contains('-bse0')));
+    });
+
+    test('extracts a real archive with controlled limits on Windows', () async {
+      if (!Platform.isWindows ||
+          !File(r'C:\Program Files\7-Zip\7z.exe').existsSync()) {
+        return;
+      }
+      final root = await Directory.systemTemp.createTemp('gpth-7zip-direct-');
+      try {
+        final input = await Directory('${root.path}/input').create();
+        final output = Directory('${root.path}/output');
+        final marker = utf8.encode('direct 7-Zip process');
+        final archive = Archive()
+          ..addFile(ArchiveFile('Takeout/marker.txt', marker.length, marker));
+        final zip = File('${input.path}/takeout-001.zip');
+        await zip.writeAsBytes(ZipEncoder().encodeBytes(archive));
+
+        await ZipExtractionService(
+          presenter: InteractivePresenterService(enableSleep: false),
+          limits: ZipExtractionLimits(workers: 1, threadsPerProcess: 2),
+        ).extractAll([zip], output);
+
+        expect(
+          File('${output.path}/Takeout/marker.txt').readAsStringSync(),
+          'direct 7-Zip process',
+        );
+      } finally {
+        await root.delete(recursive: true);
+      }
     });
   });
 }

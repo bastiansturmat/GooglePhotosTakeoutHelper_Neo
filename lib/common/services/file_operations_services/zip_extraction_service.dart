@@ -50,6 +50,8 @@ class ZipExtractionLimits {
   final int? workers;
   final int? threadsPerProcess;
 
+  bool get isControlled => workers != null || threadsPerProcess != null;
+
   ZipExtractionPlan resolve({
     required final int zipCount,
     required final int processorCount,
@@ -73,6 +75,42 @@ class ZipExtractionPlan {
 
   final int workers;
   final int threadsPerProcess;
+}
+
+/// Fully quoted process contract for one 7-Zip extraction. The executable is
+/// launched directly: shell mediation is unnecessary and can swallow or delay
+/// process creation for paths containing spaces on Windows.
+class SevenZipInvocation {
+  const SevenZipInvocation({
+    required this.executable,
+    required this.arguments,
+    this.runInShell = false,
+  });
+
+  factory SevenZipInvocation.forExtraction({
+    required final String executable,
+    required final String zipPath,
+    required final String outputPath,
+    required final int threads,
+  }) => SevenZipInvocation(
+    executable: executable,
+    arguments: [
+      'x',
+      zipPath,
+      '-o$outputPath',
+      '-y',
+      '-aoa',
+      '-mmt=$threads',
+      '-mcp=65001',
+      '-bso0',
+      '-bse1',
+      '-bsp0',
+    ],
+  );
+
+  final String executable;
+  final List<String> arguments;
+  final bool runInShell;
 }
 
 /// Service for handling ZIP file extraction with safety checks and error handling.
@@ -270,6 +308,9 @@ class ZipExtractionService with LoggerMixin {
         logWarning('Continuing with remaining ZIP files...');
       }
     } on FileSystemException catch (e) {
+      if (limits.isControlled) {
+        _handleExtractionError(zip, e, isFileSystemError: true, failFast: true);
+      }
       try {
         _handleExtractionError(zip, e, isFileSystemError: true);
       } catch (extractionError) {
@@ -352,12 +393,19 @@ class ZipExtractionService with LoggerMixin {
         logDebug('Extraction succeeded for $zipName using 7-Zip extractor');
         return true;
       } else {
+        if (limits.isControlled && _sevenZipExecutable != null) {
+          throw FileSystemException(
+            'Controlled 7-Zip extraction failed; native fallback is disabled',
+            zip.path,
+          );
+        }
         logWarning(
           '7-Zip failed or not found for $zipName, trying Native extractor...',
         );
       }
     } catch (e) {
       logWarning('7-Zip extraction threw an error for $zipName: $e');
+      if (limits.isControlled && _sevenZipExecutable != null) rethrow;
     }
 
     // 3) Try Native (Dart) first to preserve Unicode names as-is
@@ -424,28 +472,22 @@ class ZipExtractionService with LoggerMixin {
       return false;
     }
 
-    final String zipPath = zip.path;
-    final String outDir = destinationDir.path;
-
-    // 7z x "<zip>" -o"<outDir>" -y -aoa -mmt=N -mcp=65001 -bso0 -bse0 -bsp0
+    // 7z x "<zip>" -o"<outDir>" -y -aoa -mmt=N -mcp=65001 -bso0 -bse1 -bsp0
     // -mmt=N    -> explicit thread count (faster than letting 7-Zip decide)
     // -mcp=65001 -> force UTF-8 for filenames (helps when archives lack proper UTF-8 flag)
-    // -bso0 -bse0 -bsp0 -> suppress stdout/stderr/progress to reduce pipe I/O overhead
-    // _sevenZipThreads is halved when running 2 ZIPs in parallel so total CPU stays the same.
-    final int threads = _sevenZipThreads;
-    final List<String> args = [
-      'x',
-      zipPath,
-      '-o$outDir',
-      '-y',
-      '-aoa',
-      '-mmt=$threads',
-      '-mcp=65001',
-      '-bso0',
-      '-bse0',
-      '-bsp0',
-    ];
-    logDebug('Running 7-Zip: $sevenZip ${args.join(' ')}');
+    // -bso0 -bsp0 suppress normal/progress output; -bse1 preserves diagnostics.
+    final invocation = SevenZipInvocation.forExtraction(
+      executable: sevenZip,
+      zipPath: zip.path,
+      outputPath: destinationDir.path,
+      threads: _sevenZipThreads,
+    );
+    logPrint(
+      'Starting 7-Zip for ${p.basename(zip.path)} ($_sevenZipThreads threads)',
+    );
+    logDebug(
+      'Running 7-Zip: ${invocation.executable} ${invocation.arguments.join(' ')}',
+    );
 
     try {
       final Map<String, String> env = Map<String, String>.from(
@@ -456,16 +498,25 @@ class ZipExtractionService with LoggerMixin {
         env['LC_ALL'] = env['LC_ALL'] ?? 'C.UTF-8';
       }
       final ProcessResult result = await Process.run(
-        sevenZip,
-        args,
-        runInShell: true,
+        invocation.executable,
+        invocation.arguments,
+        runInShell: invocation.runInShell,
         environment: env,
       );
       logDebug('7-Zip exitCode: ${result.exitCode}');
       final String so = (result.stdout ?? '').toString().trim();
       final String se = (result.stderr ?? '').toString().trim();
       if (so.isNotEmpty) logDebug('7-Zip stdout: $so');
-      if (se.isNotEmpty) logDebug('7-Zip stderr: $se');
+      if (se.isNotEmpty) {
+        if (result.exitCode == 0) {
+          logDebug('7-Zip stderr: $se');
+        } else {
+          logWarning('7-Zip stderr: $se');
+        }
+      }
+      if (result.exitCode != 0) {
+        logWarning('7-Zip failed with exit code ${result.exitCode}.');
+      }
       return result.exitCode == 0;
     } catch (e) {
       logDebug('7-Zip invocation failed: $e');
@@ -874,6 +925,7 @@ class ZipExtractionService with LoggerMixin {
     final bool isArchiveError = false,
     final bool isPathError = false,
     final bool isFileSystemError = false,
+    final bool failFast = false,
   }) {
     final String zipName = p.basename(zip.path);
 
@@ -933,10 +985,16 @@ class ZipExtractionService with LoggerMixin {
     logError('');
     logError('===============================================');
     logError('');
-    logError('⚠️  ZIP EXTRACTION FAILED - CONTINUING WITH PROCESSING');
-    logError('The ZIP extraction failed, but GPTH will continue processing');
-    logError('any files that were successfully extracted before the error.');
-    logError('Please check the extraction directory for partial results.');
+    if (failFast) {
+      logError('❌ ZIP EXTRACTION FAILED - PROCESSING STOPPED');
+      logError('Controlled extraction will not use the native fallback.');
+      logError('Resolve the 7-Zip error above and start the repair again.');
+    } else {
+      logError('⚠️  ZIP EXTRACTION FAILED - CONTINUING WITH PROCESSING');
+      logError('The ZIP extraction failed, but GPTH will continue processing');
+      logError('any files that were successfully extracted before the error.');
+      logError('Please check the extraction directory for partial results.');
+    }
 
     // Propagate to caller
     throw Exception('ZIP extraction failed: $errorObject');

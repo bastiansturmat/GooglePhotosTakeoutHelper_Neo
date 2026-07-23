@@ -306,6 +306,10 @@ The maximum configured 7-Zip thread count is therefore
 `zip-workers × zip-threads`. Actual CPU usage can be lower because disk speed
 and compression format also limit extraction throughput.
 
+With explicit limits GPTH starts 7-Zip directly, preserves its error output and
+fails the extraction if 7-Zip fails. It does not silently switch a large archive
+to the memory-heavy native Dart extractor.
+
 ```bash
 gpth --input "D:\Takeout" --output "D:\Takeout-Repaired" \
   --zip-workers 2 --zip-threads 8 --keep-input --no-interactive
