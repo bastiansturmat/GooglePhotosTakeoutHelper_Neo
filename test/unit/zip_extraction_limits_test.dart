@@ -83,6 +83,52 @@ void main() {
   });
 
   group('SevenZipInvocation', () {
+    test('controlled extraction requires the app-supplied 7-Zip path', () {
+      expect(
+        () => resolveControlledSevenZipPath(
+          environment: const <String, String>{},
+          fileExists: (_) => false,
+        ),
+        throwsA(isA<FileSystemException>()),
+      );
+    });
+
+    test('controlled extraction uses only the app-supplied 7-Zip path', () {
+      const bundled = r'C:\Program Files\Immich Desktop\7z.exe';
+      expect(
+        resolveControlledSevenZipPath(
+          environment: const <String, String>{
+            'PATH': r'C:\Program Files\7-Zip',
+            'IMMICH_DESKTOP_7ZIP': bundled,
+          },
+          fileExists: (path) => path == bundled,
+        ),
+        bundled,
+      );
+    });
+
+    test(
+      'controlled extraction rejects a missing path before output creation',
+      () async {
+        final root = await Directory.systemTemp.createTemp(
+          'gpth-7zip-fail-closed-',
+        );
+        final output = Directory('${root.path}/must-not-exist');
+        try {
+          await expectLater(
+            ZipExtractionService(
+              limits: ZipExtractionLimits(workers: 1, threadsPerProcess: 2),
+              environment: const <String, String>{},
+            ).extractAll(const <File>[], output),
+            throwsA(isA<FileSystemException>()),
+          );
+          expect(output.existsSync(), isFalse);
+        } finally {
+          await root.delete(recursive: true);
+        }
+      },
+    );
+
     test('starts the executable directly and keeps diagnostics on stderr', () {
       final invocation = SevenZipInvocation.forExtraction(
         executable: r'C:\Program Files\7-Zip\7z.exe',
@@ -115,6 +161,9 @@ void main() {
         await ZipExtractionService(
           presenter: InteractivePresenterService(enableSleep: false),
           limits: ZipExtractionLimits(workers: 1, threadsPerProcess: 2),
+          environment: const <String, String>{
+            'IMMICH_DESKTOP_7ZIP': r'C:\Program Files\7-Zip\7z.exe',
+          },
         ).extractAll([zip], output);
 
         expect(

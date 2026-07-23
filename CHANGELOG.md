@@ -1,3 +1,15 @@
+## 6.1.8-immich-desktop.3
+
+### Desktop controlled extraction
+
+- Controlled ZIP extraction now requires the parent app's
+  `IMMICH_DESKTOP_7ZIP` executable path. It no longer discovers a system 7-Zip
+  through PATH or common install locations and never falls back to the native
+  Dart extractor when the app-owned runtime is missing.
+- The controlled extractor resolves the required executable before creating
+  the destination directory, so an invalid process contract fails without
+  writing repair output.
+
 ## 6.1.8
 ### 🛠️ **Maintenance**
   - **Vendored the `motion_photos` package locally to resolve a dependency conflict** — The `motion_photos` package (v1.0.0, last published 19 months ago) pins `xml ^6.2.2`, which is incompatible with `image ^4.9.1` (which requires `xml ^7.0.1`), causing `dart pub get` to fail with a version-solving error. Rather than downgrade `image` (losing fixes and features) or wait for an upstream release that does not exist, the small surface area of `motion_photos` that GPTH uses (`MotionPhotos`, `isMotionPhoto()`, `getMotionVideoIndex()`, `VideoIndex`) is now re-implemented as a pure-Dart module at `lib/common/services/media_services/motion_photos.dart`. The implementation mirrors the package's algorithm verbatim (Boyer-Moore search for the MP4 `ftyp mp42` header, then XMP fallback parsing `GCamera:MicroVideoOffset` / `Item:Length`), with the only difference being that XMP parsing uses regex instead of the `xml` package, dropping the transitive `xml` dependency entirely. The `motion_photos` dependency was removed from `pubspec.yaml`, and all imports in `lib` and `test` were updated to point at the local module.

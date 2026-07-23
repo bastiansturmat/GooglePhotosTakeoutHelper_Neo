@@ -6,6 +6,34 @@ import 'package:archive/archive_io.dart';
 import 'package:gpth_neo/gpth_lib_exports.dart';
 import 'package:path/path.dart' as p;
 
+const String _controlledSevenZipEnvironmentKey = 'IMMICH_DESKTOP_7ZIP';
+
+bool _fileExistsSync(final String path) => File(path).existsSync();
+
+/// Resolves the desktop app's verified 7-Zip executable. Controlled extraction
+/// is fail-closed: PATH and machine-wide installations are intentionally not
+/// considered, because only the parent app can attest the bundled binary.
+String resolveControlledSevenZipPath({
+  required final Map<String, String> environment,
+  final bool Function(String) fileExists = _fileExistsSync,
+}) {
+  final String? configured = environment[_controlledSevenZipEnvironmentKey];
+  final String path = configured?.trim() ?? '';
+  if (path.isEmpty) {
+    throw const FileSystemException(
+      'Controlled extraction requires the app-supplied '
+      '$_controlledSevenZipEnvironmentKey path. No system fallback is allowed.',
+    );
+  }
+  if (!fileExists(path)) {
+    throw FileSystemException(
+      'The app-supplied 7-Zip executable is missing. No system fallback is allowed.',
+      path,
+    );
+  }
+  return p.normalize(path);
+}
+
 /// Optional resource limits for ZIP extraction. Omitting both values preserves
 /// GPTH Neo's upstream throughput-oriented policy.
 class ZipExtractionLimits {
@@ -129,12 +157,15 @@ class ZipExtractionService with LoggerMixin {
   ZipExtractionService({
     final InteractivePresenterService? presenter,
     final ZipExtractionLimits? limits,
+    final Map<String, String>? environment,
     this.enableNameDiagnostics = false, // set to false to silence name logs
   }) : _presenter = presenter ?? InteractivePresenterService(),
-       limits = limits ?? ZipExtractionLimits();
+       limits = limits ?? ZipExtractionLimits(),
+       _environment = environment ?? Platform.environment;
 
   final InteractivePresenterService _presenter;
   final ZipExtractionLimits limits;
+  final Map<String, String> _environment;
 
   /// When true, the extractor logs suspicious entry names (e.g., ones containing '¥', 'Ñ', 'ñ', '~')
   /// with their code points before and after sanitization to diagnose mojibake issues.
@@ -167,17 +198,11 @@ class ZipExtractionService with LoggerMixin {
       }
     }
 
-    // Create destination directory (no destructive cleanup).
-    await dir.create(recursive: true);
-
-    await _presenter.showUnzipStartMessage();
-
-    // Pre-detect 7-Zip once before the per-file loop so the message appears
-    // prominently at the start of extraction, not buried in per-file debug output.
+    // Resolve the extraction engine before the first destination write. In
+    // controlled desktop mode this rejects a missing app-owned 7-Zip instead
+    // of silently changing to the native Dart extractor.
     if (!_sevenZipLookupDone) {
-      _sevenZipExecutable = Platform.isWindows
-          ? await _find7zipWindows()
-          : await _whichFirst(['7z', '7za', '7zz']);
+      _sevenZipExecutable = await _resolveSevenZip();
       _sevenZipLookupDone = true;
       if (_sevenZipExecutable != null) {
         logPrint(
@@ -187,6 +212,11 @@ class ZipExtractionService with LoggerMixin {
         logPrint('7-Zip not found - falling back to native Dart extractor');
       }
     }
+
+    // Create destination directory (no destructive cleanup).
+    await dir.create(recursive: true);
+
+    await _presenter.showUnzipStartMessage();
 
     // Determine parallelism. ZIP extraction is I/O-bound (JPEGs are already
     // compressed, so Deflate does very little CPU work). On SSD/NVMe, more
@@ -459,9 +489,7 @@ class ZipExtractionService with LoggerMixin {
     final Directory destinationDir,
   ) async {
     if (!_sevenZipLookupDone) {
-      _sevenZipExecutable = Platform.isWindows
-          ? await _find7zipWindows()
-          : await _whichFirst(['7z', '7za', '7zz']);
+      _sevenZipExecutable = await _resolveSevenZip();
       _sevenZipLookupDone = true;
     }
     final String? sevenZip = _sevenZipExecutable;
@@ -522,6 +550,15 @@ class ZipExtractionService with LoggerMixin {
       logDebug('7-Zip invocation failed: $e');
       return false;
     }
+  }
+
+  Future<String?> _resolveSevenZip() async {
+    if (limits.isControlled) {
+      return resolveControlledSevenZipPath(environment: _environment);
+    }
+    return Platform.isWindows
+        ? _find7zipWindows()
+        : _whichFirst(['7z', '7za', '7zz']);
   }
 
   /// Windows-specific deep search for 7-Zip executables.
