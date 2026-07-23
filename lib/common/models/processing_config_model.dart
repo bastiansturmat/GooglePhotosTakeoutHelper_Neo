@@ -76,6 +76,8 @@ class ProcessingConfig {
     this.disableResumeCheck = false,
     this.allPhotosDirectoryName = kAllPhotosDirectoryName,
     this.hardlink = false,
+    this.zipWorkers,
+    this.zipThreadsPerProcess,
   }) : userInputRoot = userInputRoot ?? inputPath;
 
   /// Creates a builder for configuring ProcessingConfig
@@ -105,6 +107,8 @@ class ProcessingConfig {
   final bool inputExtractedFromZip;
   final String userInputRoot;
   final bool disableResumeCheck;
+  final int? zipWorkers;
+  final int? zipThreadsPerProcess;
 
   /// Prefer hard links over symlinks for shortcut/reverse-shortcut strategies (Windows only).
   final bool hardlink;
@@ -119,6 +123,16 @@ class ProcessingConfig {
     }
     if (outputPath.isEmpty) {
       throw const ConfigurationException('Output path cannot be empty');
+    }
+    if (zipWorkers != null && zipWorkers! <= 0) {
+      throw const ConfigurationException(
+        'ZIP workers must be greater than zero',
+      );
+    }
+    if (zipThreadsPerProcess != null && zipThreadsPerProcess! <= 0) {
+      throw const ConfigurationException(
+        'ZIP threads must be greater than zero',
+      );
     }
     // Solo mode validation - solo mode implies extension fixing is enabled
     if (extensionFixing == ExtensionFixingMode.solo) {
@@ -189,6 +203,8 @@ class ProcessingConfig {
     final bool? disableResumeCheck,
     final String? allPhotosDirectoryName,
     final bool? hardlink,
+    final int? zipWorkers,
+    final int? zipThreadsPerProcess,
   }) => ProcessingConfig(
     inputPath: inputPath ?? this.inputPath,
     outputPath: outputPath ?? this.outputPath,
@@ -215,6 +231,8 @@ class ProcessingConfig {
     allPhotosDirectoryName:
         allPhotosDirectoryName ?? this.allPhotosDirectoryName,
     hardlink: hardlink ?? this.hardlink,
+    zipWorkers: zipWorkers ?? this.zipWorkers,
+    zipThreadsPerProcess: zipThreadsPerProcess ?? this.zipThreadsPerProcess,
   );
 }
 
@@ -258,6 +276,8 @@ class ProcessingConfigBuilder {
   String _allPhotosDirectoryName = kAllPhotosDirectoryName;
   bool _hardlink = false;
   bool _disableResumeCheck = false;
+  int? _zipWorkers;
+  int? _zipThreadsPerProcess;
 
   /// Set album behavior (shortcut, reverse-shortcut, duplicate-copy, json, nothing, ignore)
   set albumBehavior(final AlbumBehavior behavior) {
@@ -381,6 +401,14 @@ class ProcessingConfigBuilder {
     _disableResumeCheck = value;
   }
 
+  set zipWorkers(final int? value) {
+    _zipWorkers = value;
+  }
+
+  set zipThreadsPerProcess(final int? value) {
+    _zipThreadsPerProcess = value;
+  }
+
   /// Build the final ProcessingConfig instance
   ProcessingConfig build() {
     final config = ProcessingConfig(
@@ -409,6 +437,8 @@ class ProcessingConfigBuilder {
       allPhotosDirectoryName: _allPhotosDirectoryName,
       hardlink: _hardlink,
       disableResumeCheck: _disableResumeCheck,
+      zipWorkers: _zipWorkers,
+      zipThreadsPerProcess: _zipThreadsPerProcess,
     );
 
     // Validate the configuration before returning

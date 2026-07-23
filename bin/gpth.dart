@@ -576,6 +576,16 @@ ArgParser _createArgumentParser() => ArgParser()
     'limit-filesize',
     help: 'Enforces 64MB file size limit for low RAM systems',
   )
+  ..addOption(
+    'zip-workers',
+    help:
+        'Maximum ZIP archives extracted concurrently. Omit to use GPTH automatic parallelism.',
+  )
+  ..addOption(
+    'zip-threads',
+    help:
+        '7-Zip threads per extraction process. Omit to use all logical processors.',
+  )
   ..addFlag(
     'divide-partner-shared',
     help: 'Move partner shared media to separate folder (PARTNER_SHARED)',
@@ -670,14 +680,20 @@ Future<ProcessingConfig> _buildConfigFromArgs(final ArgResults res) async {
   // Set up interactive mode if needed
   final isInteractiveMode =
       res['interactive'] || (res.arguments.isEmpty && stdin.hasTerminal);
+  final zipLimits = ZipExtractionLimits.fromCliValues(
+    res['zip-workers'] as String?,
+    res['zip-threads'] as String?,
+  );
   // Get input/output paths (interactive or from args)
-  final paths = await _getInputOutputPaths(res, isInteractiveMode);
+  final paths = await _getInputOutputPaths(res, isInteractiveMode, zipLimits);
 
   // Build configuration using the builder pattern
   final configBuilder = ProcessingConfig.builder(
     inputPath: paths.inputPath,
     outputPath: paths.outputPath,
   );
+  configBuilder.zipWorkers = zipLimits.workers;
+  configBuilder.zipThreadsPerProcess = zipLimits.threadsPerProcess;
   // Apply all configuration options
   // if (res['save-log']) configBuilder.saveLog = true;
 
@@ -908,6 +924,14 @@ List<String> _interactiveEquivalentArgs(final ProcessingConfig config) =>
       if (config.keepDuplicates) '--keep-duplicates',
       if (config.hardlink) '--hardlink',
       if (config.disableResumeCheck) '--no-resume',
+      if (config.zipWorkers != null) ...[
+        '--zip-workers',
+        config.zipWorkers.toString(),
+      ],
+      if (config.zipThreadsPerProcess != null) ...[
+        '--zip-threads',
+        config.zipThreadsPerProcess.toString(),
+      ],
     ];
 
 void _logInteractiveEquivalentArgs(final ProcessingConfig config) {
@@ -1102,6 +1126,7 @@ String? _sanitizePath(final String? rawPath) {
 Future<InputOutputPaths> _getInputOutputPaths(
   final ArgResults res,
   final bool isInteractiveMode,
+  final ZipExtractionLimits zipLimits,
 ) async {
   // Strip trailing path separators to tolerate arguments like "path\output\"
   // which on Windows cause the C-runtime to misparse subsequent flags.
@@ -1210,6 +1235,7 @@ Future<InputOutputPaths> _getInputOutputPaths(
         await ServiceContainer.instance.interactiveService.extractAll(
           zips,
           extractDir,
+          limits: zipLimits,
         );
         await _writeZipExtractionSentinel(zips, Directory(out.path));
         print('');
@@ -1313,6 +1339,7 @@ Future<InputOutputPaths> _getInputOutputPaths(
             await ServiceContainer.instance.interactiveService.extractAll(
               zips,
               extractDir,
+              limits: zipLimits,
             );
             await _writeZipExtractionSentinel(zips, outDir);
             logPrint(
@@ -1535,6 +1562,10 @@ Future<ProcessingResult> _executeProcessing(
             await ServiceContainer.instance.interactiveService.extractAll(
               zips,
               extractDir,
+              limits: ZipExtractionLimits(
+                workers: config.zipWorkers,
+                threadsPerProcess: config.zipThreadsPerProcess,
+              ),
             );
             await _writeZipExtractionSentinel(zips, outputDir);
           }

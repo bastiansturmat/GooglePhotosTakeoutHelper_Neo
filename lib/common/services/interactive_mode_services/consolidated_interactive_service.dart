@@ -461,10 +461,14 @@ class ConsolidatedInteractiveService with LoggerMixin {
   /// [outputDirectory] Directory to extract to
   Future<Directory> extractAll(
     final List<File> zipFiles,
-    final Directory outputDirectory,
-  ) async {
+    final Directory outputDirectory, {
+    final ZipExtractionLimits? limits,
+  }) async {
     // Delegate to the existing ZIP extraction service for now
-    final zipService = ZipExtractionService(presenter: _presenter);
+    final zipService = ZipExtractionService(
+      presenter: _presenter,
+      limits: limits,
+    );
     await zipService.extractAll(zipFiles, outputDirectory);
     return outputDirectory;
   }

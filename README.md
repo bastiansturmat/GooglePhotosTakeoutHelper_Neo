@@ -292,6 +292,25 @@ gpth --input "/path/to/takeout" --output "/path/to/organized" --albums "shortcut
 | `--hardlink`     | Windows only: for `shortcut` and `reverse-shortcut`, create hard links instead of symlinks (same drive required) |
 | `--keep-input`   | Work on a temporary sibling copy of --input (suffix _tmp), keeping the original untouched     |
 
+### ZIP Extraction Resources
+
+This fork adds explicit 7-Zip resource controls for desktop integrations. If
+either option is omitted, GPTH keeps its upstream automatic behavior.
+
+| Argument | Description |
+|----------|-------------|
+| `--zip-workers` | Maximum ZIP archives extracted concurrently; clamped to the number of input ZIPs |
+| `--zip-threads` | 7-Zip threads assigned to each extraction process |
+
+The maximum configured 7-Zip thread count is therefore
+`zip-workers × zip-threads`. Actual CPU usage can be lower because disk speed
+and compression format also limit extraction throughput.
+
+```bash
+gpth --input "D:\Takeout" --output "D:\Takeout-Repaired" \
+  --zip-workers 2 --zip-threads 8 --keep-input --no-interactive
+```
+
 
 ### Organization Options
 

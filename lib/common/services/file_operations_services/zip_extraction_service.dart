@@ -6,6 +6,75 @@ import 'package:archive/archive_io.dart';
 import 'package:gpth_neo/gpth_lib_exports.dart';
 import 'package:path/path.dart' as p;
 
+/// Optional resource limits for ZIP extraction. Omitting both values preserves
+/// GPTH Neo's upstream throughput-oriented policy.
+class ZipExtractionLimits {
+  ZipExtractionLimits({this.workers, this.threadsPerProcess}) {
+    if (workers != null && workers! <= 0) {
+      throw ArgumentError.value(
+        workers,
+        'workers',
+        'must be greater than zero',
+      );
+    }
+    if (threadsPerProcess != null && threadsPerProcess! <= 0) {
+      throw ArgumentError.value(
+        threadsPerProcess,
+        'threadsPerProcess',
+        'must be greater than zero',
+      );
+    }
+  }
+
+  factory ZipExtractionLimits.fromCliValues(
+    final String? workers,
+    final String? threadsPerProcess,
+  ) {
+    int? parse(final String option, final String? value) {
+      if (value == null) return null;
+      final parsed = int.tryParse(value);
+      if (parsed == null || parsed <= 0) {
+        throw FormatException(
+          '--$option must be a positive integer (got "$value")',
+        );
+      }
+      return parsed;
+    }
+
+    return ZipExtractionLimits(
+      workers: parse('zip-workers', workers),
+      threadsPerProcess: parse('zip-threads', threadsPerProcess),
+    );
+  }
+
+  final int? workers;
+  final int? threadsPerProcess;
+
+  ZipExtractionPlan resolve({
+    required final int zipCount,
+    required final int processorCount,
+    required final bool hasSevenZip,
+  }) {
+    final int resolvedWorkers = hasSevenZip && zipCount > 1
+        ? min(workers ?? max(2, processorCount ~/ 4), zipCount)
+        : 1;
+    return ZipExtractionPlan(
+      workers: resolvedWorkers,
+      threadsPerProcess: threadsPerProcess ?? max(1, processorCount),
+    );
+  }
+}
+
+class ZipExtractionPlan {
+  const ZipExtractionPlan({
+    required this.workers,
+    required this.threadsPerProcess,
+  });
+
+  final int workers;
+  final int threadsPerProcess;
+}
+
 /// Service for handling ZIP file extraction with safety checks and error handling.
 ///
 /// This service provides secure ZIP extraction functionality with comprehensive
@@ -21,10 +90,13 @@ class ZipExtractionService with LoggerMixin {
   /// Creates a new instance of ZipExtractionService
   ZipExtractionService({
     final InteractivePresenterService? presenter,
+    final ZipExtractionLimits? limits,
     this.enableNameDiagnostics = false, // set to false to silence name logs
-  }) : _presenter = presenter ?? InteractivePresenterService();
+  }) : _presenter = presenter ?? InteractivePresenterService(),
+       limits = limits ?? ZipExtractionLimits();
 
   final InteractivePresenterService _presenter;
+  final ZipExtractionLimits limits;
 
   /// When true, the extractor logs suspicious entry names (e.g., ones containing '¥', 'Ñ', 'ñ', '~')
   /// with their code points before and after sanitization to diagnose mojibake issues.
@@ -86,13 +158,20 @@ class ZipExtractionService with LoggerMixin {
     // block on I/O and don't compete meaningfully for CPU.
     // Native Dart extraction is memory-heavy — keep it sequential to avoid
     // two large ZIPs competing for heap space simultaneously.
-    final int concurrency = _sevenZipExecutable != null && zips.length > 1
-        ? min(max(2, Platform.numberOfProcessors ~/ 4), zips.length)
-        : 1;
-    _sevenZipThreads = Platform.numberOfProcessors;
+    final plan = limits.resolve(
+      zipCount: zips.length,
+      processorCount: Platform.numberOfProcessors,
+      hasSevenZip: _sevenZipExecutable != null,
+    );
+    final int concurrency = plan.workers;
+    _sevenZipThreads = plan.threadsPerProcess;
     if (concurrency > 1) {
       logPrint(
         'Extracting $concurrency ZIPs in parallel ($_sevenZipThreads threads per 7-Zip process)',
+      );
+    } else if (_sevenZipExecutable != null && zips.isNotEmpty) {
+      logPrint(
+        'Extracting 1 ZIP at a time ($_sevenZipThreads threads per 7-Zip process)',
       );
     }
 
