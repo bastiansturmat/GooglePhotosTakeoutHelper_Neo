@@ -140,7 +140,84 @@ void main() {
       expect(invocation.runInShell, isFalse);
       expect(invocation.arguments, contains('-mmt=4'));
       expect(invocation.arguments, contains('-bse1'));
+      expect(invocation.arguments, contains('-bsp1'));
       expect(invocation.arguments, isNot(contains('-bse0')));
+    });
+
+    test('parses only bounded 7-Zip progress percentages', () {
+      expect(parseSevenZipProgressPercent('  42% 1234 - Takeout/file.jpg'), 42);
+      expect(parseSevenZipProgressPercent('100% Everything is Ok'), 100);
+      expect(parseSevenZipProgressPercent('Scanning the drive'), isNull);
+      expect(parseSevenZipProgressPercent('101% invalid'), isNull);
+    });
+
+    test('encodes one machine-readable worker event without path leakage', () {
+      final line = encodeDesktopZipEvent(
+        worker: 2,
+        archiveIndex: 4,
+        totalArchives: 6,
+        archiveName: 'takeout-004.zip',
+        state: 'activity',
+        percent: 37,
+      );
+
+      expect(line, startsWith('[IMMICH_DESKTOP_EVENT] '));
+      expect(line, contains('"event":"zip-progress"'));
+      expect(line, contains('"archiveName":"takeout-004.zip"'));
+      expect(line, isNot(contains(r'D:\Takeout')));
+    });
+
+    test('blocks unsafe and colliding Windows archive targets before extraction', () {
+      expect(
+        () => normalizeWindowsArchiveTarget('../escape.jpg'),
+        throwsA(isA<SecurityException>()),
+      );
+      expect(
+        () => normalizeWindowsArchiveTarget('C:/escape.jpg'),
+        throwsA(isA<SecurityException>()),
+      );
+      expect(
+        () => normalizeWindowsArchiveTarget('Takeout/CON.jpg'),
+        throwsA(isA<SecurityException>()),
+      );
+      expect(
+        () => validateControlledArchiveTargets({
+          'one.zip': ['Takeout/Photos/A.jpg'],
+          'two.zip': ['takeout/photos/a.JPG'],
+        }),
+        throwsA(isA<SecurityException>()),
+      );
+      expect(
+        normalizeWindowsArchiveTarget('Takeout/Photos/A.jpg'),
+        'takeout/photos/a.jpg',
+      );
+    });
+
+    test('writes an exclusive app ownership marker for controlled work folders', () async {
+      final root = await Directory.systemTemp.createTemp('gpth-owner-');
+      const ownership =
+          '{"schemaVersion":1,"runId":7,"inputPath":"c:/takeout",'
+          '"outputPath":"d:/repair","toolSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+          '"ownershipToken":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}';
+      try {
+        await writeDesktopOwnershipMarker(
+          root,
+          environment: const {'IMMICH_DESKTOP_OWNERSHIP_JSON': ownership},
+        );
+        expect(
+          await File('${root.path}/$desktopOwnershipMarkerFile').readAsString(),
+          ownership,
+        );
+        await expectLater(
+          writeDesktopOwnershipMarker(
+            root,
+            environment: const {'IMMICH_DESKTOP_OWNERSHIP_JSON': ownership},
+          ),
+          throwsA(isA<FileSystemException>()),
+        );
+      } finally {
+        await root.delete(recursive: true);
+      }
     });
 
     test('extracts a real archive with controlled limits on Windows', () async {

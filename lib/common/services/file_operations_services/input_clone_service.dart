@@ -63,6 +63,7 @@ class InputCloneService with LoggerMixin {
     if (!await destination.exists()) {
       await destination.create(recursive: true);
     }
+    await writeDesktopOwnershipMarker(destination);
 
     // We copy breadth-first to ensure parent directories exist for files
     await for (final entity in source.list(

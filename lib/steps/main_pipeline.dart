@@ -36,6 +36,9 @@ class ProcessingPipeline with LoggerMixin {
     final overallStopwatch = Stopwatch()..start();
     final mediaCollection = MediaEntityCollection();
 
+    await outputDirectory.create(recursive: true);
+    await writeDesktopOwnershipMarker(outputDirectory);
+
     // --- Crash-recovery: restore any emoji-renamed source dirs from a previous run ---
     await StepProgressSaver.restoreEmojiRenamesFromProgress(outputDirectory);
 

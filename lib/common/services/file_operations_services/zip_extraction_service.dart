@@ -7,6 +7,112 @@ import 'package:gpth_neo/gpth_lib_exports.dart';
 import 'package:path/path.dart' as p;
 
 const String _controlledSevenZipEnvironmentKey = 'IMMICH_DESKTOP_7ZIP';
+const String _desktopEventPrefix = '[IMMICH_DESKTOP_EVENT] ';
+const String _desktopOwnershipEnvironmentKey = 'IMMICH_DESKTOP_OWNERSHIP_JSON';
+const String desktopOwnershipMarkerFile = '.immich-desktop-owner.json';
+
+Future<void> writeDesktopOwnershipMarker(
+  final Directory directory, {
+  final Map<String, String>? environment,
+}) async {
+  final value = (environment ?? Platform.environment)[_desktopOwnershipEnvironmentKey];
+  if (value == null || value.trim().isEmpty) return;
+  final decoded = jsonDecode(value);
+  if (decoded is! Map<String, dynamic> ||
+      decoded['schemaVersion'] != 1 ||
+      decoded['ownershipToken'] is! String ||
+      (decoded['ownershipToken'] as String).length != 64) {
+    throw const FormatException('Invalid app ownership contract');
+  }
+  await directory.create(recursive: true);
+  final marker = File(p.join(directory.path, desktopOwnershipMarkerFile));
+  if (await marker.exists()) {
+    throw FileSystemException('Ownership marker already exists', marker.path);
+  }
+  final temporary = File('${marker.path}.tmp');
+  await temporary.writeAsString(value, flush: true);
+  await temporary.rename(marker.path);
+}
+
+int? parseSevenZipProgressPercent(final String frame) {
+  final match = RegExp(r'(^|\s)(\d{1,3})%').firstMatch(frame);
+  if (match == null) return null;
+  final value = int.tryParse(match.group(2)!);
+  return value != null && value >= 0 && value <= 100 ? value : null;
+}
+
+String encodeDesktopZipEvent({
+  required final int worker,
+  required final int archiveIndex,
+  required final int totalArchives,
+  required final String archiveName,
+  required final String state,
+  final int? percent,
+}) =>
+    '$_desktopEventPrefix${jsonEncode(<String, Object?>{
+      'event': 'zip-progress',
+      'worker': worker,
+      'archiveIndex': archiveIndex,
+      'totalArchives': totalArchives,
+      'archiveName': p.basename(archiveName),
+      'state': state,
+      'percent': percent,
+    })}';
+
+String normalizeWindowsArchiveTarget(final String entryName) {
+  final unified = entryName.replaceAll('\\', '/');
+  if (unified.startsWith('/') || RegExp(r'^[A-Za-z]:').hasMatch(unified)) {
+    throw SecurityException('Absolute archive path is not allowed: $entryName');
+  }
+  final normalized = <String>[];
+  const reserved = <String>{
+    'CON', 'PRN', 'AUX', 'NUL',
+    'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+    'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+  };
+  for (final raw in unified.split('/')) {
+    if (raw.isEmpty || raw == '.') continue;
+    if (raw == '..') {
+      throw SecurityException('Archive path traversal is not allowed: $entryName');
+    }
+    if (raw.contains(':') || RegExp(r'[<>"|?*\x00-\x1F]').hasMatch(raw)) {
+      throw SecurityException('Unsafe Windows archive path is not allowed: $entryName');
+    }
+    final segment = raw.replaceFirst(RegExp(r'[. ]+$'), '');
+    if (segment.isEmpty) {
+      throw SecurityException('Archive path normalizes to an empty segment: $entryName');
+    }
+    if (reserved.contains(segment.split('.').first.toUpperCase())) {
+      throw SecurityException('Reserved Windows archive path is not allowed: $entryName');
+    }
+    normalized.add(segment.toLowerCase());
+  }
+  if (normalized.isEmpty) {
+    throw SecurityException('Archive entry has no safe target path: $entryName');
+  }
+  final target = normalized.join('/');
+  if (target.length > 240) {
+    throw SecurityException('Archive target path exceeds the controlled Windows limit: $entryName');
+  }
+  return target;
+}
+
+void validateControlledArchiveTargets(final Map<String, Iterable<String>> archives) {
+  final owners = <String, String>{};
+  for (final archive in archives.entries) {
+    for (final entryName in archive.value) {
+      final target = normalizeWindowsArchiveTarget(entryName);
+      final previous = owners[target];
+      if (previous != null) {
+        throw SecurityException(
+          'Archives ${p.basename(previous)} and ${p.basename(archive.key)} both target $target. '
+          'Controlled extraction refuses a Windows-normalized overwrite.',
+        );
+      }
+      owners[target] = archive.key;
+    }
+  }
+}
 
 bool _fileExistsSync(final String path) => File(path).existsSync();
 
@@ -132,7 +238,7 @@ class SevenZipInvocation {
       '-mcp=65001',
       '-bso0',
       '-bse1',
-      '-bsp0',
+      '-bsp1',
     ],
   );
 
@@ -213,8 +319,29 @@ class ZipExtractionService with LoggerMixin {
       }
     }
 
+    // One central-directory pass is permitted before extraction. It prevents
+    // parallel workers from writing the same Windows-normalized path and blocks
+    // traversal/device/ADS targets before the destination is created.
+    if (limits.isControlled) {
+      final targets = <String, Iterable<String>>{};
+      for (final zip in zips) {
+        final input = InputFileStream(zip.path);
+        try {
+          final archive = ZipDecoder().decodeStream(input);
+          targets[zip.path] = archive
+              .where((entry) => entry.isFile)
+              .map((entry) => entry.name)
+              .toList(growable: false);
+        } finally {
+          await input.close();
+        }
+      }
+      validateControlledArchiveTargets(targets);
+    }
+
     // Create destination directory (no destructive cleanup).
     await dir.create(recursive: true);
+    await writeDesktopOwnershipMarker(dir, environment: _environment);
 
     await _presenter.showUnzipStartMessage();
 
@@ -272,22 +399,57 @@ class ZipExtractionService with LoggerMixin {
     // Worker pool: up to `concurrency` ZIPs extracted simultaneously.
     // Dart's single-threaded model makes the index increment race-free.
     var nextIndex = 0;
-    Future<void> worker() async {
+    Future<void> worker(final int workerId) async {
       while (true) {
         final int i = nextIndex++;
         if (i >= zips.length) break;
-        await _extractSingleZip(zips[i], dir);
+        await _extractSingleZip(
+          zips[i],
+          dir,
+          worker: workerId,
+          archiveIndex: i + 1,
+          totalArchives: zips.length,
+        );
       }
     }
 
-    await Future.wait(List.generate(concurrency, (_) => worker()));
+    await Future.wait(List.generate(concurrency, (index) => worker(index + 1)));
 
     await _presenter.showUnzipComplete();
   }
 
   /// Extracts a single ZIP file with full error handling and progress reporting.
-  Future<void> _extractSingleZip(final File zip, final Directory dir) async {
+  Future<void> _extractSingleZip(
+    final File zip,
+    final Directory dir, {
+    required final int worker,
+    required final int archiveIndex,
+    required final int totalArchives,
+  }) async {
+    void emitTerminal(final String state, final int? percent) {
+      stdout.writeln(
+        encodeDesktopZipEvent(
+          worker: worker,
+          archiveIndex: archiveIndex,
+          totalArchives: totalArchives,
+          archiveName: zip.path,
+          state: state,
+          percent: percent,
+        ),
+      );
+    }
+
     await _presenter.showUnzipProgress(p.basename(zip.path));
+    stdout.writeln(
+      encodeDesktopZipEvent(
+        worker: worker,
+        archiveIndex: archiveIndex,
+        totalArchives: totalArchives,
+        archiveName: zip.path,
+        state: 'started',
+        percent: 0,
+      ),
+    );
 
     try {
       // Validate ZIP file exists and is readable
@@ -314,7 +476,22 @@ class ZipExtractionService with LoggerMixin {
       // - On *nix, prefer native to keep Unicode intact; fall back to unzip/7-Zip only if needed.
       // - On Windows, 7-Zip often handles mixed encodings better than native; keep previous order.
       // ─────────────────────────────────────────────────────────────────────
-      final extracted = await _extractZipWithStrategy(zip, dir);
+      final extracted = await _extractZipWithStrategy(
+        zip,
+        dir,
+        onSevenZipProgress: (percent) {
+          stdout.writeln(
+            encodeDesktopZipEvent(
+              worker: worker,
+              archiveIndex: archiveIndex,
+              totalArchives: totalArchives,
+              archiveName: zip.path,
+              state: 'activity',
+              percent: percent,
+            ),
+          );
+        },
+      );
       if (!extracted) {
         logWarning(
           'No external extractor succeeded; falling back to native streamed extractor (safety fallback).',
@@ -323,7 +500,12 @@ class ZipExtractionService with LoggerMixin {
       }
 
       await _presenter.showUnzipSuccess(p.basename(zip.path));
+      emitTerminal('completed', 100);
     } on ArchiveException catch (e) {
+      if (limits.isControlled) {
+        emitTerminal('failed', null);
+        rethrow;
+      }
       try {
         _handleExtractionError(zip, e, isArchiveError: true);
       } catch (extractionError) {
@@ -331,6 +513,10 @@ class ZipExtractionService with LoggerMixin {
         logWarning('Continuing with remaining ZIP files...');
       }
     } on PathNotFoundException catch (e) {
+      if (limits.isControlled) {
+        emitTerminal('failed', null);
+        rethrow;
+      }
       try {
         _handleExtractionError(zip, e, isPathError: true);
       } catch (extractionError) {
@@ -339,6 +525,7 @@ class ZipExtractionService with LoggerMixin {
       }
     } on FileSystemException catch (e) {
       if (limits.isControlled) {
+        emitTerminal('failed', null);
         _handleExtractionError(zip, e, isFileSystemError: true, failFast: true);
       }
       try {
@@ -348,6 +535,10 @@ class ZipExtractionService with LoggerMixin {
         logWarning('Continuing with remaining ZIP files...');
       }
     } catch (e) {
+      if (limits.isControlled) {
+        emitTerminal('failed', null);
+        rethrow;
+      }
       // Handle memory exhaustion specifically
       final errorMessage = e.toString().toLowerCase();
       if (errorMessage.contains('exhausted heap') ||
@@ -388,8 +579,9 @@ class ZipExtractionService with LoggerMixin {
   /// Returns true if any external/native strategy completed the extraction.
   Future<bool> _extractZipWithStrategy(
     final File zip,
-    final Directory destinationDir,
-  ) async {
+    final Directory destinationDir, {
+    final void Function(int percent)? onSevenZipProgress,
+  }) async {
     final String zipName = p.basename(zip.path);
     logDebug('Starting extraction strategy for $zipName');
 
@@ -417,7 +609,11 @@ class ZipExtractionService with LoggerMixin {
     try {
       final ok = await _timed(
         '7-Zip',
-        () => _tryExtractWith7zip(zip, destinationDir),
+        () => _tryExtractWith7zip(
+          zip,
+          destinationDir,
+          onProgress: onSevenZipProgress,
+        ),
       );
       if (ok) {
         logDebug('Extraction succeeded for $zipName using 7-Zip extractor');
@@ -486,8 +682,9 @@ class ZipExtractionService with LoggerMixin {
   /// NEW: forces UTF-8 filenames with -mcp=65001 and ensures UTF-8 locale on *nix to avoid mojibake.
   Future<bool> _tryExtractWith7zip(
     final File zip,
-    final Directory destinationDir,
-  ) async {
+    final Directory destinationDir, {
+    final void Function(int percent)? onProgress,
+  }) async {
     if (!_sevenZipLookupDone) {
       _sevenZipExecutable = await _resolveSevenZip();
       _sevenZipLookupDone = true;
@@ -500,10 +697,10 @@ class ZipExtractionService with LoggerMixin {
       return false;
     }
 
-    // 7z x "<zip>" -o"<outDir>" -y -aoa -mmt=N -mcp=65001 -bso0 -bse1 -bsp0
+    // 7z x "<zip>" -o"<outDir>" -y -aoa -mmt=N -mcp=65001 -bso0 -bse1 -bsp1
     // -mmt=N    -> explicit thread count (faster than letting 7-Zip decide)
     // -mcp=65001 -> force UTF-8 for filenames (helps when archives lack proper UTF-8 flag)
-    // -bso0 -bsp0 suppress normal/progress output; -bse1 preserves diagnostics.
+    // -bso0 suppresses normal output, -bsp1 streams progress and -bse1 preserves diagnostics.
     final invocation = SevenZipInvocation.forExtraction(
       executable: sevenZip,
       zipPath: zip.path,
@@ -525,27 +722,50 @@ class ZipExtractionService with LoggerMixin {
         env['LANG'] = env['LANG'] ?? 'C.UTF-8';
         env['LC_ALL'] = env['LC_ALL'] ?? 'C.UTF-8';
       }
-      final ProcessResult result = await Process.run(
+      final Process process = await Process.start(
         invocation.executable,
         invocation.arguments,
         runInShell: invocation.runInShell,
         environment: env,
       );
-      logDebug('7-Zip exitCode: ${result.exitCode}');
-      final String so = (result.stdout ?? '').toString().trim();
-      final String se = (result.stderr ?? '').toString().trim();
-      if (so.isNotEmpty) logDebug('7-Zip stdout: $so');
+      int? lastPercent;
+      var pending = '';
+      void consumeFrame(final String frame) {
+        final percent = parseSevenZipProgressPercent(frame);
+        if (percent != null && percent != lastPercent) {
+          lastPercent = percent;
+          onProgress?.call(percent);
+        }
+      }
+      final stdoutFuture = process.stdout
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .forEach((chunk) {
+            final frames = '$pending$chunk'.split(RegExp(r'[\r\n]+'));
+            pending = frames.removeLast();
+            for (final frame in frames) {
+              consumeFrame(frame);
+            }
+          });
+      final stderrBuffer = StringBuffer();
+      final stderrFuture = process.stderr
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .forEach(stderrBuffer.write);
+      final exitCode = await process.exitCode;
+      await Future.wait([stdoutFuture, stderrFuture]);
+      if (pending.isNotEmpty) consumeFrame(pending);
+      logDebug('7-Zip exitCode: $exitCode');
+      final String se = stderrBuffer.toString().trim();
       if (se.isNotEmpty) {
-        if (result.exitCode == 0) {
+        if (exitCode == 0) {
           logDebug('7-Zip stderr: $se');
         } else {
           logWarning('7-Zip stderr: $se');
         }
       }
-      if (result.exitCode != 0) {
-        logWarning('7-Zip failed with exit code ${result.exitCode}.');
+      if (exitCode != 0) {
+        logWarning('7-Zip failed with exit code $exitCode.');
       }
-      return result.exitCode == 0;
+      return exitCode == 0;
     } catch (e) {
       logDebug('7-Zip invocation failed: $e');
       return false;
