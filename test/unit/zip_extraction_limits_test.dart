@@ -167,58 +167,66 @@ void main() {
       expect(line, isNot(contains(r'D:\Takeout')));
     });
 
-    test('blocks unsafe and colliding Windows archive targets before extraction', () {
-      expect(
-        () => normalizeWindowsArchiveTarget('../escape.jpg'),
-        throwsA(isA<SecurityException>()),
-      );
-      expect(
-        () => normalizeWindowsArchiveTarget('C:/escape.jpg'),
-        throwsA(isA<SecurityException>()),
-      );
-      expect(
-        () => normalizeWindowsArchiveTarget('Takeout/CON.jpg'),
-        throwsA(isA<SecurityException>()),
-      );
-      expect(
-        () => validateControlledArchiveTargets({
-          'one.zip': ['Takeout/Photos/A.jpg'],
-          'two.zip': ['takeout/photos/a.JPG'],
-        }),
-        throwsA(isA<SecurityException>()),
-      );
-      expect(
-        normalizeWindowsArchiveTarget('Takeout/Photos/A.jpg'),
-        'takeout/photos/a.jpg',
-      );
-    });
-
-    test('writes an exclusive app ownership marker for controlled work folders', () async {
-      final root = await Directory.systemTemp.createTemp('gpth-owner-');
-      const ownership =
-          '{"schemaVersion":1,"runId":7,"inputPath":"c:/takeout",'
-          '"outputPath":"d:/repair","toolSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
-          '"ownershipToken":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}';
-      try {
-        await writeDesktopOwnershipMarker(
-          root,
-          environment: const {'IMMICH_DESKTOP_OWNERSHIP_JSON': ownership},
+    test(
+      'blocks unsafe and colliding Windows archive targets before extraction',
+      () {
+        expect(
+          () => normalizeWindowsArchiveTarget('../escape.jpg'),
+          throwsA(isA<SecurityException>()),
         );
         expect(
-          await File('${root.path}/$desktopOwnershipMarkerFile').readAsString(),
-          ownership,
+          () => normalizeWindowsArchiveTarget('C:/escape.jpg'),
+          throwsA(isA<SecurityException>()),
         );
-        await expectLater(
-          writeDesktopOwnershipMarker(
+        expect(
+          () => normalizeWindowsArchiveTarget('Takeout/CON.jpg'),
+          throwsA(isA<SecurityException>()),
+        );
+        expect(
+          () => validateControlledArchiveTargets({
+            'one.zip': ['Takeout/Photos/A.jpg'],
+            'two.zip': ['takeout/photos/a.JPG'],
+          }),
+          throwsA(isA<SecurityException>()),
+        );
+        expect(
+          normalizeWindowsArchiveTarget('Takeout/Photos/A.jpg'),
+          'takeout/photos/a.jpg',
+        );
+      },
+    );
+
+    test(
+      'writes an exclusive app ownership marker for controlled work folders',
+      () async {
+        final root = await Directory.systemTemp.createTemp('gpth-owner-');
+        const ownership =
+            '{"schemaVersion":1,"runId":7,"inputPath":"c:/takeout",'
+            '"outputPath":"d:/repair","toolSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+            '"ownershipToken":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}';
+        try {
+          await writeDesktopOwnershipMarker(
             root,
             environment: const {'IMMICH_DESKTOP_OWNERSHIP_JSON': ownership},
-          ),
-          throwsA(isA<FileSystemException>()),
-        );
-      } finally {
-        await root.delete(recursive: true);
-      }
-    });
+          );
+          expect(
+            await File(
+              '${root.path}/$desktopOwnershipMarkerFile',
+            ).readAsString(),
+            ownership,
+          );
+          await expectLater(
+            writeDesktopOwnershipMarker(
+              root,
+              environment: const {'IMMICH_DESKTOP_OWNERSHIP_JSON': ownership},
+            ),
+            throwsA(isA<FileSystemException>()),
+          );
+        } finally {
+          await root.delete(recursive: true);
+        }
+      },
+    );
 
     test('extracts a real archive with controlled limits on Windows', () async {
       if (!Platform.isWindows ||

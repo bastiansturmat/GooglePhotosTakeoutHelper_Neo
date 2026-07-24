@@ -15,7 +15,8 @@ Future<void> writeDesktopOwnershipMarker(
   final Directory directory, {
   final Map<String, String>? environment,
 }) async {
-  final value = (environment ?? Platform.environment)[_desktopOwnershipEnvironmentKey];
+  final value =
+      (environment ?? Platform.environment)[_desktopOwnershipEnvironmentKey];
   if (value == null || value.trim().isEmpty) return;
   final decoded = jsonDecode(value);
   if (decoded is! Map<String, dynamic> ||
@@ -49,15 +50,7 @@ String encodeDesktopZipEvent({
   required final String state,
   final int? percent,
 }) =>
-    '$_desktopEventPrefix${jsonEncode(<String, Object?>{
-      'event': 'zip-progress',
-      'worker': worker,
-      'archiveIndex': archiveIndex,
-      'totalArchives': totalArchives,
-      'archiveName': p.basename(archiveName),
-      'state': state,
-      'percent': percent,
-    })}';
+    '$_desktopEventPrefix${jsonEncode(<String, Object?>{'event': 'zip-progress', 'worker': worker, 'archiveIndex': archiveIndex, 'totalArchives': totalArchives, 'archiveName': p.basename(archiveName), 'state': state, 'percent': percent})}';
 
 String normalizeWindowsArchiveTarget(final String entryName) {
   final unified = entryName.replaceAll('\\', '/');
@@ -66,38 +59,71 @@ String normalizeWindowsArchiveTarget(final String entryName) {
   }
   final normalized = <String>[];
   const reserved = <String>{
-    'CON', 'PRN', 'AUX', 'NUL',
-    'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
-    'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+    'CON',
+    'PRN',
+    'AUX',
+    'NUL',
+    'COM1',
+    'COM2',
+    'COM3',
+    'COM4',
+    'COM5',
+    'COM6',
+    'COM7',
+    'COM8',
+    'COM9',
+    'LPT1',
+    'LPT2',
+    'LPT3',
+    'LPT4',
+    'LPT5',
+    'LPT6',
+    'LPT7',
+    'LPT8',
+    'LPT9',
   };
   for (final raw in unified.split('/')) {
     if (raw.isEmpty || raw == '.') continue;
     if (raw == '..') {
-      throw SecurityException('Archive path traversal is not allowed: $entryName');
+      throw SecurityException(
+        'Archive path traversal is not allowed: $entryName',
+      );
     }
     if (raw.contains(':') || RegExp(r'[<>"|?*\x00-\x1F]').hasMatch(raw)) {
-      throw SecurityException('Unsafe Windows archive path is not allowed: $entryName');
+      throw SecurityException(
+        'Unsafe Windows archive path is not allowed: $entryName',
+      );
     }
     final segment = raw.replaceFirst(RegExp(r'[. ]+$'), '');
     if (segment.isEmpty) {
-      throw SecurityException('Archive path normalizes to an empty segment: $entryName');
+      throw SecurityException(
+        'Archive path normalizes to an empty segment: $entryName',
+      );
     }
     if (reserved.contains(segment.split('.').first.toUpperCase())) {
-      throw SecurityException('Reserved Windows archive path is not allowed: $entryName');
+      throw SecurityException(
+        'Reserved Windows archive path is not allowed: $entryName',
+      );
     }
     normalized.add(segment.toLowerCase());
   }
   if (normalized.isEmpty) {
-    throw SecurityException('Archive entry has no safe target path: $entryName');
+    throw SecurityException(
+      'Archive entry has no safe target path: $entryName',
+    );
   }
   final target = normalized.join('/');
   if (target.length > 240) {
-    throw SecurityException('Archive target path exceeds the controlled Windows limit: $entryName');
+    throw SecurityException(
+      'Archive target path exceeds the controlled Windows limit: $entryName',
+    );
   }
   return target;
 }
 
-void validateControlledArchiveTargets(final Map<String, Iterable<String>> archives) {
+void validateControlledArchiveTargets(
+  final Map<String, Iterable<String>> archives,
+) {
   final owners = <String, String>{};
   for (final archive in archives.entries) {
     for (final entryName in archive.value) {
@@ -737,14 +763,13 @@ class ZipExtractionService with LoggerMixin {
           onProgress?.call(percent);
         }
       }
+
       final stdoutFuture = process.stdout
           .transform(const Utf8Decoder(allowMalformed: true))
           .forEach((chunk) {
             final frames = '$pending$chunk'.split(RegExp(r'[\r\n]+'));
             pending = frames.removeLast();
-            for (final frame in frames) {
-              consumeFrame(frame);
-            }
+            frames.forEach(consumeFrame);
           });
       final stderrBuffer = StringBuffer();
       final stderrFuture = process.stderr
