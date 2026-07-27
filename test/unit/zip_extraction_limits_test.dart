@@ -193,6 +193,19 @@ void main() {
           normalizeWindowsArchiveTarget('Takeout/Photos/A.jpg'),
           'takeout/photos/a.jpg',
         );
+
+        // Directory markers carry no file target. Real Takeout archives contain
+        // them, and rejecting one aborted the whole extraction with code 12
+        // after minutes of work -- a security check must not fail a legitimate
+        // archive. They cannot overwrite anything, so they are simply skipped.
+        expect(normalizeWindowsArchiveTarget('.'), isNull);
+        expect(normalizeWindowsArchiveTarget('./'), isNull);
+        expect(
+          () => validateControlledArchiveTargets({
+            'one.zip': ['.', 'Takeout/Photos/A.jpg'],
+          }),
+          returnsNormally,
+        );
       },
     );
 

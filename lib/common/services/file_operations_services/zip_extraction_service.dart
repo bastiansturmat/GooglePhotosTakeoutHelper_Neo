@@ -52,7 +52,7 @@ String encodeDesktopZipEvent({
 }) =>
     '$_desktopEventPrefix${jsonEncode(<String, Object?>{'event': 'zip-progress', 'worker': worker, 'archiveIndex': archiveIndex, 'totalArchives': totalArchives, 'archiveName': p.basename(archiveName), 'state': state, 'percent': percent})}';
 
-String normalizeWindowsArchiveTarget(final String entryName) {
+String? normalizeWindowsArchiveTarget(final String entryName) {
   final unified = entryName.replaceAll('\\', '/');
   if (unified.startsWith('/') || RegExp(r'^[A-Za-z]:').hasMatch(unified)) {
     throw SecurityException('Absolute archive path is not allowed: $entryName');
@@ -108,9 +108,11 @@ String normalizeWindowsArchiveTarget(final String entryName) {
     normalized.add(segment.toLowerCase());
   }
   if (normalized.isEmpty) {
-    throw SecurityException(
-      'Archive entry has no safe target path: $entryName',
-    );
+    // A directory marker ("Takeout/", "." ) names no file. Real Takeout
+    // archives contain these, and treating one as an attack aborted the entire
+    // extraction with code 12 after minutes of work. An entry without a target
+    // cannot overwrite anything, so the caller skips it.
+    return null;
   }
   final target = normalized.join('/');
   if (target.length > 240) {
@@ -128,6 +130,7 @@ void validateControlledArchiveTargets(
   for (final archive in archives.entries) {
     for (final entryName in archive.value) {
       final target = normalizeWindowsArchiveTarget(entryName);
+      if (target == null) continue;
       final previous = owners[target];
       if (previous != null) {
         throw SecurityException(
@@ -350,7 +353,23 @@ class ZipExtractionService with LoggerMixin {
     // traversal/device/ADS targets before the destination is created.
     if (limits.isControlled) {
       final targets = <String, Iterable<String>>{};
+      // This pass reads every archive before a single byte is extracted. On a
+      // large Takeout it runs for minutes, and reporting nothing here made the
+      // app look hung: the last log line was the 7-Zip discovery, then silence.
+      logPrint(
+        'Zielpfade werden geprüft: ${zips.length} Archiv(e) vor dem Entpacken',
+      );
+      var validatedArchives = 0;
       for (final zip in zips) {
+        stdout.writeln(
+          encodeDesktopZipEvent(
+            worker: 1,
+            archiveIndex: validatedArchives + 1,
+            totalArchives: zips.length,
+            archiveName: zip.path,
+            state: 'validating',
+          ),
+        );
         final input = InputFileStream(zip.path);
         try {
           final archive = ZipDecoder().decodeStream(input);
@@ -361,6 +380,10 @@ class ZipExtractionService with LoggerMixin {
         } finally {
           await input.close();
         }
+        validatedArchives++;
+        logPrint(
+          'Zielpfade geprüft: $validatedArchives von ${zips.length} Archiv(en)',
+        );
       }
       validateControlledArchiveTargets(targets);
     }

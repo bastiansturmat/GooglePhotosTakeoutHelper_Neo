@@ -5,7 +5,7 @@
 library;
 
 /// Application version
-const String version = '6.1.8-immich-desktop.5';
+const String version = '6.1.8-immich-desktop.6';
 
 /// Multilingual Google Photos "Photos from" prefixes used in Takeout year folders.
 /// Keep this as the single source of truth for year-folder language variants.
