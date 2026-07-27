@@ -461,7 +461,12 @@ Future<ProcessingConfig?> _parseArguments(final List<String> arguments) async {
 
     if (res['help']) {
       _showHelp(parser);
-      return null;
+      // Returning null only unwinds main(); the ServiceContainer initialised
+      // before parsing keeps the Dart event loop alive, so the process printed
+      // its help and then hung forever. Callers that probe the version banner
+      // (the desktop app does) were left with a stray process every time.
+      await ServiceContainer.reset();
+      exit(0);
     }
 
     if (res['hardlink'] == true && !Platform.isWindows) {
