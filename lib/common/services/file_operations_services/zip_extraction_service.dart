@@ -389,6 +389,7 @@ class ZipExtractionService with LoggerMixin {
     }
 
     // Create destination directory (no destructive cleanup).
+    logPrint('Zielordner wird vorbereitet …');
     await dir.create(recursive: true);
     await writeDesktopOwnershipMarker(dir, environment: _environment);
 
@@ -419,7 +420,9 @@ class ZipExtractionService with LoggerMixin {
       );
     }
 
-    // Pre-check for very large files and warn user
+    // Pre-check for very large files and warn user. This stats every archive,
+    // which is another quiet stretch on a slow disk, so it announces itself.
+    logPrint('Archivgrößen werden ermittelt: ${zips.length} Archiv(e)');
     var hasLargeFiles = false;
     var totalSize = 0;
     for (final File zip in zips) {
