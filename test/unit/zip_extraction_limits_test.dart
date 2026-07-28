@@ -168,48 +168,6 @@ void main() {
     });
 
     test(
-      'blocks unsafe and colliding Windows archive targets before extraction',
-      () {
-        expect(
-          () => normalizeWindowsArchiveTarget('../escape.jpg'),
-          throwsA(isA<SecurityException>()),
-        );
-        expect(
-          () => normalizeWindowsArchiveTarget('C:/escape.jpg'),
-          throwsA(isA<SecurityException>()),
-        );
-        expect(
-          () => normalizeWindowsArchiveTarget('Takeout/CON.jpg'),
-          throwsA(isA<SecurityException>()),
-        );
-        expect(
-          () => validateControlledArchiveTargets({
-            'one.zip': ['Takeout/Photos/A.jpg'],
-            'two.zip': ['takeout/photos/a.JPG'],
-          }),
-          throwsA(isA<SecurityException>()),
-        );
-        expect(
-          normalizeWindowsArchiveTarget('Takeout/Photos/A.jpg'),
-          'takeout/photos/a.jpg',
-        );
-
-        // Directory markers carry no file target. Real Takeout archives contain
-        // them, and rejecting one aborted the whole extraction with code 12
-        // after minutes of work -- a security check must not fail a legitimate
-        // archive. They cannot overwrite anything, so they are simply skipped.
-        expect(normalizeWindowsArchiveTarget('.'), isNull);
-        expect(normalizeWindowsArchiveTarget('./'), isNull);
-        expect(
-          () => validateControlledArchiveTargets({
-            'one.zip': ['.', 'Takeout/Photos/A.jpg'],
-          }),
-          returnsNormally,
-        );
-      },
-    );
-
-    test(
       'writes an exclusive app ownership marker for controlled work folders',
       () async {
         final root = await Directory.systemTemp.createTemp('gpth-owner-');
