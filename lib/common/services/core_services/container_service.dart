@@ -186,4 +186,16 @@ class ServiceContainer {
     await _instance?.dispose();
     _instance = null;
   }
+
+  /// Kill every child process we own, right now, without awaiting anything.
+  ///
+  /// The last thing to run before an `exit(code)`. Nothing asynchronous survives
+  /// that call, so the graceful [dispose] never gets its chance on a failure
+  /// path -- and a leaked `exiftool -stay_open` then outlives the run and every
+  /// run after it.
+  static bool killChildProcessesNow() {
+    final exifTool = _instance?.exifTool;
+    if (exifTool == null) return false;
+    return exifTool.killPersistentProcessNow();
+  }
 }

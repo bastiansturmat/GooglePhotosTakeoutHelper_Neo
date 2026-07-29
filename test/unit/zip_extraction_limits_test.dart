@@ -230,5 +230,120 @@ void main() {
         await root.delete(recursive: true);
       }
     });
+
+    test('keeps the intact files when one member is damaged', () async {
+      // A single corrupt video inside a 50 GB Takeout archive used to abort the
+      // whole repair with an unexplained exit code 12. 7-Zip writes every other
+      // member intact, so the run must continue and name what was lost.
+      final sevenZip = _appSevenZip();
+      if (sevenZip == null) return;
+      final root = await Directory.systemTemp.createTemp('gpth-damaged-');
+      try {
+        final input = await Directory('${root.path}/input').create();
+        final output = Directory('${root.path}/output');
+        final zip = File('${input.path}/takeout-001.zip');
+        await zip.writeAsBytes(_zipWithOneDamagedMember());
+
+        final service = ZipExtractionService(
+          limits: ZipExtractionLimits(workers: 1, threadsPerProcess: 2),
+          environment: <String, String>{'IMMICH_DESKTOP_7ZIP': sevenZip},
+        );
+        await service.extractAll([zip], output);
+
+        expect(
+          File('${output.path}/Takeout/intact-01.jpg').readAsBytesSync().length,
+          200000,
+          reason: 'an intact member must survive a damaged neighbour',
+        );
+        expect(
+          File('${output.path}/Takeout/intact-02.jpg').readAsBytesSync().length,
+          200000,
+        );
+        expect(service.damagedMembers, hasLength(1));
+        expect(service.damagedMembers.single.path, endsWith('broken.mp4'));
+      } finally {
+        await root.delete(recursive: true);
+      }
+    });
+
+    test('an unreadable archive fails and carries 7-Zip\'s verdict', () async {
+      // Not the same as a missing file (caught before 7-Zip runs): this one
+      // exists, so 7-Zip is invoked and its exit code is the only explanation
+      // available. It has to reach the caller.
+      final sevenZip = _appSevenZip();
+      if (sevenZip == null) return;
+      final root = await Directory.systemTemp.createTemp('gpth-unreadable-');
+      try {
+        final input = await Directory('${root.path}/input').create();
+        final notAZip = File('${input.path}/takeout-001.zip');
+        await notAZip.writeAsBytes(List<int>.filled(4096, 0x5A));
+
+        final service = ZipExtractionService(
+          limits: ZipExtractionLimits(workers: 1, threadsPerProcess: 2),
+          environment: <String, String>{'IMMICH_DESKTOP_7ZIP': sevenZip},
+        );
+        await expectLater(
+          service.extractAll([notAZip], Directory('${root.path}/output')),
+          throwsA(
+            isA<Exception>().having(
+              (final e) => e.toString(),
+              'message',
+              contains('7-Zip exited with code'),
+            ),
+          ),
+          reason: 'a fatal failure must carry the exit code, not just "failed"',
+        );
+        expect(
+          service.damagedMembers,
+          isEmpty,
+          reason: 'an unopenable archive has no salvaged members',
+        );
+      } finally {
+        await root.delete(recursive: true);
+      }
+    });
   });
+}
+
+/// The app-owned 7-Zip, or null when this machine has none to test against.
+String? _appSevenZip() {
+  if (!Platform.isWindows) return null;
+  for (final candidate in <String>[
+    r'C:\Projekte\Immich Go Desktop\sidecars\7z.exe',
+    r'C:\Program Files\7-Zip\7z.exe',
+  ]) {
+    if (File(candidate).existsSync()) return candidate;
+  }
+  return null;
+}
+
+/// Three members, the middle one's compressed bytes flipped so 7-Zip reports
+/// `CRC Failed` for it and extracts the other two intact.
+List<int> _zipWithOneDamagedMember() {
+  final good = List<int>.filled(200000, 0x41);
+  final bad = List<int>.filled(200000, 0x42);
+  final archive = Archive()
+    ..addFile(ArchiveFile('Takeout/intact-01.jpg', good.length, good))
+    ..addFile(ArchiveFile('Takeout/broken.mp4', bad.length, bad))
+    ..addFile(ArchiveFile('Takeout/intact-02.jpg', good.length, good));
+  final bytes = ZipEncoder().encodeBytes(archive);
+
+  // Flip a byte in the middle of the archive's payload region. The first and
+  // last members stay untouched because their data sits before/after it.
+  final raw = List<int>.from(bytes);
+  final marker = _indexOfSequence(raw, 'Takeout/broken.mp4'.codeUnits);
+  final target = marker + 'Takeout/broken.mp4'.length + 64;
+  raw[target] = raw[target] ^ 0xFF;
+  return raw;
+}
+
+int _indexOfSequence(final List<int> haystack, final List<int> needle) {
+  outer:
+  for (var i = 0; i <= haystack.length - needle.length; i++) {
+    for (var j = 0; j < needle.length; j++) {
+      if (haystack[i + j] != needle[j]) continue outer;
+    }
+    return i;
+  }
+  throw StateError('member name not found in archive bytes');
 }

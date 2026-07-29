@@ -641,6 +641,27 @@ class ExifToolService with LoggerMixin {
     }
   }
 
+  /// True while a persistent `-stay_open` ExifTool process belongs to us.
+  bool get hasPersistentProcess => _stayOpenProc != null;
+
+  /// Kill the persistent ExifTool immediately, without the graceful
+  /// `-stay_open False` handshake.
+  ///
+  /// Exists for the paths that end in `exit(code)`: the Dart VM leaves without
+  /// running any `await`, so an orphaned ExifTool would survive every run that
+  /// fails. Synchronous on purpose -- `Process.kill` is, and there is no chance
+  /// to await anything before the VM goes away.
+  bool killPersistentProcessNow() {
+    final process = _stayOpenProc;
+    if (process == null) return false;
+    _stayOpenProc = null;
+    try {
+      return process.kill(ProcessSignal.sigkill);
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> dispose() async {
     if (_isDisposed) return;
     _isDisposed = true;

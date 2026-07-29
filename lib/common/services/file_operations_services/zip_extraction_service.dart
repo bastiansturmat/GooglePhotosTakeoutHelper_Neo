@@ -42,6 +42,100 @@ int? parseSevenZipProgressPercent(final String frame) {
   return value != null && value >= 0 && value <= 100 ? value : null;
 }
 
+/// One archive member 7-Zip could not produce intact.
+class SevenZipMemberError {
+  const SevenZipMemberError({required this.path, required this.reason});
+
+  /// Path inside the archive, exactly as 7-Zip printed it.
+  final String path;
+
+  /// 7-Zip's own wording, e.g. `CRC Failed` or `Data Error`.
+  final String reason;
+
+  @override
+  String toString() => '$path ($reason)';
+}
+
+/// Per-member problems 7-Zip attributes to a named entry. `x` reports
+/// `CRC Failed`, `t` reports `Data Error`; the remaining wordings appear when a
+/// member uses an unsupported feature or its data is simply absent.
+const _sevenZipMemberReasons = <String>[
+  'CRC Failed',
+  'Data Error',
+  'Unsupported Method',
+  'Unavailable data',
+  'Unexpected end of data',
+];
+
+/// Pull the named damaged members out of 7-Zip's own output.
+///
+/// Deliberately ignores archive-level failures (`System ERROR`, unreadable
+/// archive): those carry no member name and must never be mistaken for
+/// recoverable damage.
+List<SevenZipMemberError> parseSevenZipMemberErrors(final String output) {
+  final seen = <String>{};
+  final errors = <SevenZipMemberError>[];
+  final pattern = RegExp(
+    r'^\s*ERROR:\s*(' + _sevenZipMemberReasons.join('|') + r')\s*:\s*(.+?)\s*$',
+    multiLine: true,
+  );
+  for (final match in pattern.allMatches(output)) {
+    final path = match.group(2)!;
+    if (path.isEmpty || !seen.add(path)) continue;
+    errors.add(SevenZipMemberError(path: path, reason: match.group(1)!));
+  }
+  return errors;
+}
+
+/// True when 7-Zip's only complaints are about named members, so everything
+/// else in the archive was written intact and the repair may continue without
+/// the damaged files.
+///
+/// Restricted to exit code 1 (warning) and 2 (fatal). Codes such as 8 (out of
+/// memory) or 255 (cancelled) can stop extraction anywhere, so a member error
+/// printed before them proves nothing about the rest of the archive.
+bool sevenZipFailedOnlyOnMembers({
+  required final int exitCode,
+  required final String output,
+}) {
+  if (exitCode != 1 && exitCode != 2) return false;
+  return parseSevenZipMemberErrors(output).isNotEmpty;
+}
+
+String _describeSevenZipExit(final int exitCode) => switch (exitCode) {
+  1 => 'some files could not be read',
+  2 => 'fatal error - damaged archive, or a file could not be read or written',
+  7 => 'command line / argument error',
+  8 => 'not enough memory',
+  255 => 'cancelled before it finished',
+  _ => 'unknown error',
+};
+
+/// One readable line naming the exit code, its meaning and the damaged members.
+///
+/// Single-line and length-capped on purpose: this text travels through the
+/// desktop app's log as one entry, and a wall of paths there hides the very
+/// information it is supposed to deliver. The total count always survives the
+/// cap, so "3 of 4000 files" stays distinguishable from "4000 of 4000".
+String describeSevenZipFailure({
+  required final int exitCode,
+  required final String output,
+}) {
+  final summary =
+      '7-Zip exited with code $exitCode (${_describeSevenZipExit(exitCode)})';
+  final members = parseSevenZipMemberErrors(output);
+  if (members.isEmpty) return '$summary.';
+
+  const shown = 3;
+  final named = members
+      .take(shown)
+      .map((final e) => '${e.path} [${e.reason}]')
+      .join('; ');
+  final rest = members.length - shown;
+  final tail = rest > 0 ? ' and $rest more' : '';
+  return '$summary. ${members.length} damaged file(s): $named$tail.';
+}
+
 String encodeDesktopZipEvent({
   required final int worker,
   required final int archiveIndex,
@@ -218,6 +312,18 @@ class ZipExtractionService with LoggerMixin {
   // Cache for 7-Zip executable path — resolved once per instance to avoid redundant lookups.
   String? _sevenZipExecutable;
   bool _sevenZipLookupDone = false;
+
+  /// Members 7-Zip could not produce intact, across every archive of this run.
+  ///
+  /// A damaged member is a data loss the user must learn about, but it is not a
+  /// reason to discard the tens of thousands of intact files around it. They are
+  /// collected here and reported instead of aborting.
+  final List<SevenZipMemberError> _damagedMembers = <SevenZipMemberError>[];
+  List<SevenZipMemberError> get damagedMembers =>
+      List<SevenZipMemberError>.unmodifiable(_damagedMembers);
+
+  /// Why the last 7-Zip invocation failed fatally, in 7-Zip's own words.
+  String? _lastSevenZipFailure;
   // Per-process thread count for 7-Zip, adjusted for parallelism in extractAll.
   int _sevenZipThreads = 1;
 
@@ -541,8 +647,12 @@ class ZipExtractionService with LoggerMixin {
         return true;
       } else {
         if (limits.isControlled && _sevenZipExecutable != null) {
+          // Carry 7-Zip's own verdict. Without it the desktop app can only show
+          // "extraction failed", which tells the user nothing they can act on.
+          final cause =
+              _lastSevenZipFailure ?? '7-Zip gave no diagnostic output.';
           throw FileSystemException(
-            'Controlled 7-Zip extraction failed; native fallback is disabled',
+            'Controlled 7-Zip extraction failed; native fallback is disabled. $cause',
             zip.path,
           );
         }
@@ -651,11 +761,19 @@ class ZipExtractionService with LoggerMixin {
       );
       int? lastPercent;
       var pending = '';
+      // `-bsp1`/`-bse1` put progress AND diagnostics on stdout. Progress frames
+      // are transient, but the `ERROR:` lines name the damaged members and must
+      // survive to the exit-code check -- capped so a pathological archive
+      // cannot grow this without bound.
+      final stdoutDiagnostics = StringBuffer();
       void consumeFrame(final String frame) {
         final percent = parseSevenZipProgressPercent(frame);
         if (percent != null && percent != lastPercent) {
           lastPercent = percent;
           onProgress?.call(percent);
+        }
+        if (frame.contains('ERROR') && stdoutDiagnostics.length < 1 << 20) {
+          stdoutDiagnostics.writeln(frame.trim());
         }
       }
 
@@ -682,11 +800,36 @@ class ZipExtractionService with LoggerMixin {
           logWarning('7-Zip stderr: $se');
         }
       }
-      if (exitCode != 0) {
-        logWarning('7-Zip failed with exit code $exitCode.');
+      if (exitCode == 0) {
+        _lastSevenZipFailure = null;
+        return true;
       }
-      return exitCode == 0;
+
+      // `-bse1` merges 7-Zip's diagnostics into stdout, so both streams have to
+      // be searched for the member names.
+      final combined = '${stdoutDiagnostics.toString()}\n$se';
+      final diagnosis = describeSevenZipFailure(
+        exitCode: exitCode,
+        output: combined,
+      );
+      if (sevenZipFailedOnlyOnMembers(exitCode: exitCode, output: combined)) {
+        // Everything except the named members is on disk. Report the loss on
+        // stdout -- warnings do not reach the desktop app's transcript -- and
+        // let the repair continue with the intact files.
+        for (final member in parseSevenZipMemberErrors(combined)) {
+          if (_damagedMembers.every((final e) => e.path != member.path)) {
+            _damagedMembers.add(member);
+          }
+        }
+        logPrint('Beschädigte Dateien im Archiv übersprungen: $diagnosis');
+        _lastSevenZipFailure = null;
+        return true;
+      }
+      _lastSevenZipFailure = diagnosis;
+      logWarning(diagnosis);
+      return false;
     } catch (e) {
+      _lastSevenZipFailure = '7-Zip could not be started: $e';
       logDebug('7-Zip invocation failed: $e');
       return false;
     }

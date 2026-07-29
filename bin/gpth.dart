@@ -429,6 +429,13 @@ Never _exitWithMessage(
     stdin.readLineSync();
   }
 
+  // `exit` runs no `await`, so the graceful ServiceContainer.dispose() on the
+  // happy path never happens here. Without this, every failing run leaks an
+  // `exiftool -stay_open` that outlives it.
+  try {
+    ServiceContainer.killChildProcessesNow();
+  } catch (_) {}
+
   exit(code);
 }
 
@@ -1903,6 +1910,13 @@ void _showResults(
   } else {
     logPrint('[SUCCESS] $exitMessage');
   }
+
+  // This `exit` runs before main() reaches its own dispose(), so the graceful
+  // shutdown there is dead code for every completed run. Kill our children here
+  // or a successful repair leaks an `exiftool -stay_open` just like a failed one.
+  try {
+    ServiceContainer.killChildProcessesNow();
+  } catch (_) {}
 
   exit(exitCode);
 }
