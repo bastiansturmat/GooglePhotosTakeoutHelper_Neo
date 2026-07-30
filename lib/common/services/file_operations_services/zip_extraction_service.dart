@@ -820,6 +820,11 @@ class ZipExtractionService with LoggerMixin {
           if (_damagedMembers.every((final e) => e.path != member.path)) {
             _damagedMembers.add(member);
           }
+          // 7-Zip writes the full decompressed length even when the CRC is
+          // wrong, so the corrupted file is indistinguishable from a healthy
+          // one by size. Leaving it here would repair and upload silently
+          // broken media. Remove it: a reported loss beats a hidden one.
+          await _removeDamagedMember(destinationDir, member.path);
         }
         logPrint('Beschädigte Dateien im Archiv übersprungen: $diagnosis');
         _lastSevenZipFailure = null;
@@ -832,6 +837,34 @@ class ZipExtractionService with LoggerMixin {
       _lastSevenZipFailure = '7-Zip could not be started: $e';
       logDebug('7-Zip invocation failed: $e');
       return false;
+    }
+  }
+
+  /// Delete one member 7-Zip could not produce intact.
+  ///
+  /// The archive path is 7-Zip's own text, so it is resolved strictly under the
+  /// destination and anything that escapes it is refused rather than deleted.
+  Future<void> _removeDamagedMember(
+    final Directory destinationDir,
+    final String archivePath,
+  ) async {
+    final relative = archivePath.replaceAll('\\', '/').trim();
+    if (relative.isEmpty) return;
+    final destination = p.normalize(destinationDir.absolute.path);
+    final candidate = p.normalize(p.join(destination, relative));
+    if (!p.isWithin(destination, candidate)) {
+      logWarning(
+        'Refusing to remove a damaged member outside the extraction folder: $archivePath',
+      );
+      return;
+    }
+    try {
+      final file = File(candidate);
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } catch (e) {
+      logWarning('Could not remove the damaged file $archivePath: $e');
     }
   }
 

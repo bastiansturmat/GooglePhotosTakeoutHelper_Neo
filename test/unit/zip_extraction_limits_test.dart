@@ -266,6 +266,41 @@ void main() {
       }
     });
 
+    test('a damaged member never reaches the extraction output', () async {
+      // 7-Zip writes the full decompressed length even when the CRC is wrong,
+      // so a corrupted photo is indistinguishable from a healthy one by size
+      // alone. Left in place it would be repaired and uploaded as if intact.
+      final sevenZip = _appSevenZip();
+      if (sevenZip == null) return;
+      final root = await Directory.systemTemp.createTemp('gpth-quarantine-');
+      try {
+        final input = await Directory('${root.path}/input').create();
+        final output = Directory('${root.path}/output');
+        final zip = File('${input.path}/takeout-001.zip');
+        await zip.writeAsBytes(_zipWithOneDamagedMember());
+
+        final service = ZipExtractionService(
+          limits: ZipExtractionLimits(workers: 1, threadsPerProcess: 2),
+          environment: <String, String>{'IMMICH_DESKTOP_7ZIP': sevenZip},
+        );
+        await service.extractAll([zip], output);
+
+        expect(
+          File('${output.path}/Takeout/broken.mp4').existsSync(),
+          isFalse,
+          reason: 'the damaged member must not survive extraction',
+        );
+        expect(
+          File('${output.path}/Takeout/intact-01.jpg').existsSync(),
+          isTrue,
+          reason: 'its healthy neighbours must be untouched',
+        );
+        expect(service.damagedMembers.single.path, endsWith('broken.mp4'));
+      } finally {
+        await root.delete(recursive: true);
+      }
+    });
+
     test('an unreadable archive fails and carries 7-Zip\'s verdict', () async {
       // Not the same as a missing file (caught before 7-Zip runs): this one
       // exists, so 7-Zip is invoked and its exit code is the only explanation
